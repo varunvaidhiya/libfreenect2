@@ -41,6 +41,39 @@
 #include <cmath>
 #include <limits>
 
+// NEON SIMD support for ARM processors
+#if defined(__ARM_NEON) || defined(__ARM_NEON__)
+#include <arm_neon.h>
+#define USE_NEON 1
+
+// Compatibility macros for ARMv7 vs ARMv8
+#if defined(__aarch64__) || defined(_M_ARM64)
+  // ARMv8 (AArch64) has vaddv instructions
+  #define NEON_VADDV_F32(v) vaddv_f32(v)
+  #define NEON_VADDVQ_F32(v) vaddvq_f32(v)
+#else
+  // ARMv7 compatibility - manual reduction
+  inline float neon_vaddv_f32(float32x2_t v)
+  {
+    float32x2_t sum = vpadd_f32(v, v);
+    return vget_lane_f32(sum, 0);
+  }
+  inline float neon_vaddvq_f32(float32x4_t v)
+  {
+    float32x2_t sum1 = vget_low_f32(v);
+    float32x2_t sum2 = vget_high_f32(v);
+    sum1 = vadd_f32(sum1, sum2);
+    sum1 = vpadd_f32(sum1, sum1);
+    return vget_lane_f32(sum1, 0);
+  }
+  #define NEON_VADDV_F32(v) neon_vaddv_f32(v)
+  #define NEON_VADDVQ_F32(v) neon_vaddvq_f32(v)
+#endif
+
+#else
+#define USE_NEON 0
+#endif
+
 /**
  * Vector class.
  * @tparam ScalarT Type of the elements.
@@ -285,6 +318,10 @@ public:
   Frame *ir_frame, *depth_frame;
 
   bool flip_ptables;
+  
+#if USE_NEON
+  bool use_neon;
+#endif
 
   CpuDepthPacketProcessorImpl()
   {
@@ -295,6 +332,13 @@ public:
     enable_edge_filter = true;
 
     flip_ptables = true;
+    
+#if USE_NEON
+    use_neon = true;
+    LOG_INFO << "NEON SIMD optimizations enabled";
+#else
+    use_neon = false;
+#endif
   }
 
   /** Allocate a new IR frame. */
@@ -447,6 +491,106 @@ public:
     m[1] = tmp1; // ir amplitude - (possibly bilateral filtered)
   }
 
+#if USE_NEON
+  /**
+   * NEON-optimized processMeasurementTriple - vectorizes the dot product operations
+   */
+  void processMeasurementTripleNEON(float trig_table[512*424][6], float abMultiplierPerFrq, 
+                                    int x, int y, const int32_t* m, float* m_out)
+  {
+    float zmultiplier = z_table.at(y, x);
+    if (0 < zmultiplier)
+    {
+      // Check saturation using NEON
+      int32x4_t m_vec = vld1q_s32(m);
+      int32x4_t sat_vec = vdupq_n_s32(32767);
+      uint32x4_t sat_cmp = vceqq_s32(m_vec, sat_vec);
+      bool saturated = vgetq_lane_u32(sat_cmp, 0) != 0 || 
+                       vgetq_lane_u32(sat_cmp, 1) != 0 || 
+                       vgetq_lane_u32(sat_cmp, 2) != 0;
+      
+      if (!saturated)
+      {
+        int offset = y * 512 + x;
+        
+        // Load trig values (3 cos, 3 sin)
+        float32x4_t cos_vec = vld1q_f32(&trig_table[offset][0]); // Load 4, use 3
+        float32x4_t sin_vec = vld1q_f32(&trig_table[offset][3]); // Load 4, use 3
+        
+        // Convert measurements to float
+        float32x4_t m_float = vcvtq_f32_s32(m_vec);
+        
+        // Dot products using NEON: cos * m and sin * m
+        float32x4_t cos_m = vmulq_f32(cos_vec, m_float);
+        float32x4_t sin_m = vmulq_f32(sin_vec, m_float);
+        
+        // Horizontal add for dot products (sum first 3 elements)
+        float32x2_t cos_low = vget_low_f32(cos_m);
+        float ir_image_a = NEON_VADDV_F32(cos_low) + vgetq_lane_f32(cos_m, 2);
+        ir_image_a *= abMultiplierPerFrq;
+        
+        float32x2_t sin_low = vget_low_f32(sin_m);
+        float ir_image_b = NEON_VADDV_F32(sin_low) + vgetq_lane_f32(sin_m, 2);
+        ir_image_b *= abMultiplierPerFrq;
+        
+        // Calculate amplitude: sqrt(a*a + b*b) using NEON
+        float32x2_t ab = vdup_n_f32(ir_image_a);
+        ab = vset_lane_f32(ir_image_b, ab, 1);
+        float32x2_t ab_sq = vmul_f32(ab, ab);
+        float ab_sum = NEON_VADDV_F32(ab_sq);
+        
+        // Fast sqrt using NEON reciprocal sqrt estimate + Newton-Raphson
+        float32x2_t ab_sum_vec = vdup_n_f32(ab_sum);
+        float32x2_t x = vrsqrte_f32(ab_sum_vec);
+        x = vmul_f32(x, vsub_f32(vdup_n_f32(3.0f), vmul_f32(vmul_f32(ab_sum_vec, x), x)));
+        x = vmul_f32(x, vdup_n_f32(0.5f));
+        float ir_amplitude = vget_lane_f32(vmul_f32(ab_sum_vec, x), 0) * params.ab_multiplier;
+        
+        m_out[0] = ir_image_a;
+        m_out[1] = ir_image_b;
+        m_out[2] = ir_amplitude;
+      }
+      else
+      {
+        m_out[0] = 0;
+        m_out[1] = 0;
+        m_out[2] = 65535.0;
+      }
+    }
+    else
+    {
+      m_out[0] = 0;
+      m_out[1] = 0;
+      m_out[2] = 0;
+    }
+  }
+
+  /**
+   * NEON-optimized transformMeasurements - vectorizes sqrt calculation
+   */
+  void transformMeasurementsNEON(float* m)
+  {
+    float tmp0 = std::atan2((m[1]), (m[0]));
+    tmp0 = tmp0 < 0 ? tmp0 + M_PI * 2.0f : tmp0;
+    tmp0 = (tmp0 != tmp0) ? 0 : tmp0;
+
+    // Vectorized sqrt calculation
+    float32x2_t ab = vld1_f32(m);
+    float32x2_t ab_sq = vmul_f32(ab, ab);
+    float ab_sum = NEON_VADDV_F32(ab_sq);
+    
+    // Fast sqrt using NEON
+    float32x2_t ab_sum_vec = vdup_n_f32(ab_sum);
+    float32x2_t x = vrsqrte_f32(ab_sum_vec);
+    x = vmul_f32(x, vsub_f32(vdup_n_f32(3.0f), vmul_f32(vmul_f32(ab_sum_vec, x), x)));
+    x = vmul_f32(x, vdup_n_f32(0.5f));
+    float tmp1 = vget_lane_f32(vmul_f32(ab_sum_vec, x), 0) * params.ab_multiplier;
+
+    m[0] = tmp0;
+    m[1] = tmp1;
+  }
+#endif
+
   /**
    * Process first pixel stage.
    * @param x Horizontal position.
@@ -470,9 +614,20 @@ public:
     m2_raw[1] = decodePixelMeasurement(data, 7, x, y);
     m2_raw[2] = decodePixelMeasurement(data, 8, x, y);
 
-    processMeasurementTriple(trig_table0, params.ab_multiplier_per_frq[0], x, y, m0_raw, m0_out);
-    processMeasurementTriple(trig_table1, params.ab_multiplier_per_frq[1], x, y, m1_raw, m1_out);
-    processMeasurementTriple(trig_table2, params.ab_multiplier_per_frq[2], x, y, m2_raw, m2_out);
+#if USE_NEON
+    if(use_neon)
+    {
+      processMeasurementTripleNEON(trig_table0, params.ab_multiplier_per_frq[0], x, y, m0_raw, m0_out);
+      processMeasurementTripleNEON(trig_table1, params.ab_multiplier_per_frq[1], x, y, m1_raw, m1_out);
+      processMeasurementTripleNEON(trig_table2, params.ab_multiplier_per_frq[2], x, y, m2_raw, m2_out);
+    }
+    else
+#endif
+    {
+      processMeasurementTriple(trig_table0, params.ab_multiplier_per_frq[0], x, y, m0_raw, m0_out);
+      processMeasurementTriple(trig_table1, params.ab_multiplier_per_frq[1], x, y, m1_raw, m1_out);
+      processMeasurementTriple(trig_table2, params.ab_multiplier_per_frq[2], x, y, m2_raw, m2_out);
+    }
   }
 
   /**
@@ -575,6 +730,137 @@ public:
     }
   }
 
+#if USE_NEON
+  /**
+   * NEON-optimized filterPixelStage1 - vectorizes the 3x3 kernel operations
+   */
+  void filterPixelStage1NEON(int x, int y, const Mat<Vec<float, 9> >& m, float* m_out, bool& bilateral_max_edge_test)
+  {
+    const float *m_ptr = (m.ptr(y, x)->val);
+    bilateral_max_edge_test = true;
+
+    if(x < 1 || y < 1 || x > 510 || y > 422)
+    {
+      // Copy using NEON
+      float32x4_t vec0 = vld1q_f32(m_ptr);
+      float32x4_t vec1 = vld1q_f32(m_ptr + 4);
+      float32x2_t vec2 = vld1_f32(m_ptr + 8);
+      vst1q_f32(m_out, vec0);
+      vst1q_f32(m_out + 4, vec1);
+      vst1_f32(m_out + 8, vec2);
+    }
+    else
+    {
+      float m_normalized[2];
+      float other_m_normalized[2];
+
+      int offset = 0;
+
+      for(int i = 0; i < 3; ++i, m_ptr += 3, m_out += 3, offset += 3)
+      {
+        // Vectorized norm calculation
+        float32x2_t m_ab = vld1_f32(m_ptr);
+        float32x2_t m_ab_sq = vmul_f32(m_ab, m_ab);
+        float norm2 = NEON_VADDV_F32(m_ab_sq);
+        
+        // Fast reciprocal sqrt using NEON
+        float32x2_t norm2_vec = vdup_n_f32(norm2);
+        float32x2_t inv_norm = vrsqrte_f32(norm2_vec);
+        inv_norm = vmul_f32(inv_norm, vsub_f32(vdup_n_f32(3.0f), vmul_f32(vmul_f32(norm2_vec, inv_norm), inv_norm)));
+        inv_norm = vmul_f32(inv_norm, vdup_n_f32(0.5f));
+        float inv_norm_val = vget_lane_f32(inv_norm, 0);
+        
+        // Check for NaN
+        if(inv_norm_val != inv_norm_val) inv_norm_val = std::numeric_limits<float>::infinity();
+
+        m_normalized[0] = m_ptr[0] * inv_norm_val;
+        m_normalized[1] = m_ptr[1] * inv_norm_val;
+
+        float weight_acc = 0.0f;
+        float weighted_m_acc[2] = {0.0f, 0.0f};
+
+        float threshold = (params.joint_bilateral_ab_threshold * params.joint_bilateral_ab_threshold) / (params.ab_multiplier * params.ab_multiplier);
+        float joint_bilateral_exp = params.joint_bilateral_exp;
+
+        if(norm2 < threshold)
+        {
+          threshold = 0.0f;
+          joint_bilateral_exp = 0.0f;
+        }
+
+        float dist_acc = 0.0f;
+        float32x2_t m_norm_vec = vld1_f32(m_normalized);
+
+        // Load Gaussian kernel (9 elements) - process in groups
+        float32x4_t gauss0 = vld1q_f32(&params.gaussian_kernel[0]);
+        float32x4_t gauss1 = vld1q_f32(&params.gaussian_kernel[4]);
+        float gauss8 = params.gaussian_kernel[8];
+
+        int j = 0;
+        for(int yi = -1; yi < 2; ++yi)
+        {
+          for(int xi = -1; xi < 2; ++xi, ++j)
+          {
+            if(yi == 0 && xi == 0)
+            {
+              float gauss_val = (j < 4) ? vgetq_lane_f32(gauss0, j) : (j < 8) ? vgetq_lane_f32(gauss1, j - 4) : gauss8;
+              weight_acc += gauss_val;
+              weighted_m_acc[0] += gauss_val * m_ptr[0];
+              weighted_m_acc[1] += gauss_val * m_ptr[1];
+              continue;
+            }
+
+            const float *other_m_ptr = (m.ptr(y + yi, x + xi)->val) + offset;
+            
+            // Vectorized norm calculation for neighbor
+            float32x2_t other_ab = vld1_f32(other_m_ptr);
+            float32x2_t other_ab_sq = vmul_f32(other_ab, other_ab);
+            float other_norm2 = NEON_VADDV_F32(other_ab_sq);
+            
+            // Fast reciprocal sqrt
+            float32x2_t other_norm2_vec = vdup_n_f32(other_norm2);
+            float32x2_t other_inv_norm = vrsqrte_f32(other_norm2_vec);
+            other_inv_norm = vmul_f32(other_inv_norm, vsub_f32(vdup_n_f32(3.0f), vmul_f32(vmul_f32(other_norm2_vec, other_inv_norm), other_inv_norm)));
+            other_inv_norm = vmul_f32(other_inv_norm, vdup_n_f32(0.5f));
+            float other_inv_norm_val = vget_lane_f32(other_inv_norm, 0);
+            
+            if(other_inv_norm_val != other_inv_norm_val) other_inv_norm_val = std::numeric_limits<float>::infinity();
+
+            other_m_normalized[0] = other_m_ptr[0] * other_inv_norm_val;
+            other_m_normalized[1] = other_m_ptr[1] * other_inv_norm_val;
+
+            // Vectorized dot product for distance
+            float32x2_t other_norm_vec = vld1_f32(other_m_normalized);
+            float32x2_t dot_prod = vmul_f32(m_norm_vec, other_norm_vec);
+            float dist = -(NEON_VADDV_F32(dot_prod));
+            dist += 1.0f;
+            dist *= 0.5f;
+
+            float weight = 0.0f;
+            float gauss_val = (j < 4) ? vgetq_lane_f32(gauss0, j) : (j < 8) ? vgetq_lane_f32(gauss1, j - 4) : gauss8;
+
+            if(other_norm2 >= threshold)
+            {
+              weight = (gauss_val * std::exp(-1.442695f * joint_bilateral_exp * dist));
+              dist_acc += dist;
+            }
+
+            weighted_m_acc[0] += weight * other_m_ptr[0];
+            weighted_m_acc[1] += weight * other_m_ptr[1];
+            weight_acc += weight;
+          }
+        }
+
+        bilateral_max_edge_test = bilateral_max_edge_test && dist_acc < params.joint_bilateral_max_edge;
+
+        m_out[0] = 0.0f < weight_acc ? weighted_m_acc[0] / weight_acc : 0.0f;
+        m_out[1] = 0.0f < weight_acc ? weighted_m_acc[1] / weight_acc : 0.0f;
+        m_out[2] = m_ptr[2];
+      }
+    }
+  }
+#endif
+
   void processPixelStage2(int x, int y, float *m0, float *m1, float *m2, float *ir_out, float *depth_out, float *ir_sum_out)
   {
     //// 10th measurement
@@ -586,9 +872,20 @@ public:
     //// if m9 is positive or pixel is invalid (zmultiplier) we set it to 0 otherwise to its absolute value O.o
     //m9 = cond0 ? 0 : m9;
 
-    transformMeasurements(m0);
-    transformMeasurements(m1);
-    transformMeasurements(m2);
+#if USE_NEON
+    if(use_neon)
+    {
+      transformMeasurementsNEON(m0);
+      transformMeasurementsNEON(m1);
+      transformMeasurementsNEON(m2);
+    }
+    else
+#endif
+    {
+      transformMeasurements(m0);
+      transformMeasurements(m1);
+      transformMeasurements(m2);
+    }
 
     float ir_sum = m0[1] + m1[1] + m2[1];
 
@@ -907,11 +1204,20 @@ void CpuDepthPacketProcessor::process(const DepthPacket &packet)
     float *m_filtered_ptr = (m_filtered.ptr(0, 0)->val);
     unsigned char *m_max_edge_test_ptr = m_max_edge_test.ptr(0, 0);
 
-    for(int y = 0; y < 424; ++y)
+      for(int y = 0; y < 424; ++y)
       for(int x = 0; x < 512; ++x, m_filtered_ptr += 9, ++m_max_edge_test_ptr)
       {
         bool max_edge_test_val = true;
-        impl_->filterPixelStage1(x, y, m, m_filtered_ptr, max_edge_test_val);
+#if USE_NEON
+        if(impl_->use_neon)
+        {
+          impl_->filterPixelStage1NEON(x, y, m, m_filtered_ptr, max_edge_test_val);
+        }
+        else
+#endif
+        {
+          impl_->filterPixelStage1(x, y, m, m_filtered_ptr, max_edge_test_val);
+        }
         *m_max_edge_test_ptr = max_edge_test_val ? 1 : 0;
       }
 

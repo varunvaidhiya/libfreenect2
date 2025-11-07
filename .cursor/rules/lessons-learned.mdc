@@ -1,0 +1,22 @@
+---
+description: captures important patterns, preferences, and project intelligence, living document that grows smarter as progress happens
+globs: 
+alwaysApply: false
+---
+---
+description: Stores important patterns, preferences, and project intelligence, living document that grows smarter as progress happens
+globs: 
+alwaysApply: true
+---
+# Lessons Learned
+
+Capture patterns, preferences, and insights that improve future work on this project.
+
+## Template
+- **Date:**
+- **Observation:**
+- **Impact:**
+- **Actionable Guidance:**
+
+## Journal
+- _No entries yet._

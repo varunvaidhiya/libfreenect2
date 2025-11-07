@@ -21,6 +21,7 @@
   * [MacOS](README.md#macos)
   * [Linux](README.md#linux)
 * [API Documentation (external)](https://openkinect.github.io/libfreenect2/)
+* [Project Memory](README.md#project-memory)
 
 ## Description
 
@@ -355,3 +356,15 @@ class "cudaDeviceProp" has no member "clockRate"
 ##### Legacy Ubuntu Support
 
 For older Ubuntu versions (14.04-22.04), refer to the original installation instructions above. This fork is optimized for Ubuntu 24.04 LTS.
+
+## Project Memory
+
+This fork maintains project context in markdown files under `docs/` and `tasks/`:
+
+- `docs/product_requirement_docs.md` – overall requirements and goals.
+- `docs/architecture.md` – system architecture and component relationships.
+- `docs/technical.md` – environment setup, build commands, and key files.
+- `tasks/active_context.md` – current focus, recent changes, and next steps.
+- `tasks/tasks_plan.md` – backlog and status tracking.
+
+Update these documents whenever the project scope or implementation changes.

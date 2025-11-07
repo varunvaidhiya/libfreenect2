@@ -54,6 +54,19 @@ IF(MSVC)
 ELSE()
   # Heed warnings from non-MSVC compilers
   SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall")
+  
+  # Enable NEON SIMD for ARM processors (Raspberry Pi, etc.)
+  IF(CMAKE_SYSTEM_PROCESSOR MATCHES "arm" OR CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64")
+    SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -ftree-vectorize")
+    IF(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64")
+      # ARM64 (aarch64) has NEON by default, enable optimizations
+      SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -march=native")
+    ELSE()
+      # ARM 32-bit needs explicit NEON flag
+      SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -mfpu=neon -march=native")
+    ENDIF()
+    MESSAGE(STATUS "NEON SIMD optimizations enabled for ARM processor")
+  ENDIF()
 ENDIF()
 
 SET(HAVE_CXX11 disabled)

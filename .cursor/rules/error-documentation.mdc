@@ -1,0 +1,21 @@
+---
+description: Document major failure points in this project and they were solved.  To be filled by AI.
+globs: 
+alwaysApply: false
+---
+---
+description: Document major failure points in this project and they were solved.  To be filled by AI. 
+globs: 
+---# Error Documentation
+
+Use this file to record significant issues, root causes, and resolutions encountered while working on the project.
+
+## Template
+- **Date:**
+- **Context:**
+- **Problem:**
+- **Resolution:**
+- **Prevention:**
+
+## Log
+- _No entries yet._
