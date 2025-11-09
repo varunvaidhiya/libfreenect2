@@ -858,6 +858,13 @@ bool Freenect2DeviceImpl::open()
   rgb_num_xfers = 3;
   ir_pkts_per_xfer = 64;
   ir_num_xfers = 8;
+#elif defined(__arm__) || defined(__aarch64__)
+  // ARM/Raspberry Pi: Increase transfer pools to handle USB bandwidth limitations
+  // More transfers = better chance of catching packets before buffer overflow
+  // Default values may be too low for reliable operation on Pi
+  ir_num_xfers = 120;  // Increased from 60 to handle packet bursts
+  // Note: ir_pkts_per_xfer kept at 8 (some Pi USB controllers may not support larger values)
+  // RGB defaults are acceptable, but consider disabling RGB stream with -norgb for depth-only use
 #endif
 
   const char *xfer_str;

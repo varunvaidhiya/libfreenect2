@@ -29,6 +29,8 @@
 #include <libfreenect2/depth_packet_stream_parser.h>
 #include <libfreenect2/logging.h>
 #include <memory.h>
+#include <iomanip>
+#include <ios>
 
 namespace libfreenect2
 {
@@ -127,7 +129,17 @@ void DepthPacketStreamParser::onDataReceived(unsigned char* buffer, size_t in_le
               const int interval = 30;
               if ((current_sequence_ % interval == 0 && diff != 0) || diff >= interval)
               {
-                LOG_INFO << diff << " packets were lost";
+                float loss_percent = (diff * 100.0f) / (processed_packets_ > 0 ? processed_packets_ + diff : diff);
+                LOG_INFO << diff << " packets were lost (sequence " << processed_packets_ 
+                         << " -> " << current_sequence_ << ", ~" << std::fixed 
+                         << std::setprecision(1) << loss_percent << "% loss rate)";
+                if (diff >= 100)
+                {
+                  LOG_WARNING << "High packet loss detected! Consider:"
+                              << " 1) Disabling RGB stream with -norgb"
+                              << " 2) Increasing USB transfer pools (LIBFREENECT2_IR_TRANSFERS)"
+                              << " 3) Checking USB 3.0 connection and power supply";
+                }
                 processed_packets_ = current_sequence_;
               }
             }
@@ -138,7 +150,17 @@ void DepthPacketStreamParser::onDataReceived(unsigned char* buffer, size_t in_le
           }
           else
           {
-            LOG_DEBUG << "not all subsequences received " << current_subsequence_;
+            // Calculate how many subsequences were received (count set bits)
+            unsigned int received_count = 0;
+            unsigned int mask = current_subsequence_;
+            while(mask)
+            {
+              received_count += mask & 1;
+              mask >>= 1;
+            }
+            LOG_DEBUG << "not all subsequences received " << received_count << "/10 (bitmask: 0x" 
+                      << std::hex << current_subsequence_ << std::dec << ") for sequence " 
+                      << current_sequence_ << ", new sequence " << footer->sequence << " starting";
           }
 
           current_sequence_ = footer->sequence;

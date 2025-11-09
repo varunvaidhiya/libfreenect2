@@ -37,5 +37,35 @@ make install
 ```
 
 ## Troubleshooting
+
+### Depth Packet Loss on Raspberry Pi
+
+If you encounter depth packet loss errors:
+```
+[Debug] [DepthPacketStreamParser] not all subsequences received 0
+[Info] [DepthPacketStreamParser] 30 packets were lost
+```
+
+**See detailed troubleshooting guide**: `docs/troubleshooting_depth_packet_loss.md`
+
+**Quick fixes**:
+1. **Disable RGB stream** (reduces bandwidth by ~50%):
+   ```bash
+   ./build/bin/Protonect cpu -noviewer -norgb
+   ```
+
+2. **Increase USB transfer pools**:
+   ```bash
+   export LIBFREENECT2_IR_TRANSFERS=120
+   ./build/bin/Protonect cpu -noviewer -norgb
+   ```
+
+3. **Increase USB kernel buffers**:
+   ```bash
+   sudo sh -c 'echo 1000 > /sys/module/usbcore/parameters/usbfs_memory_mb'
+   ```
+
+### General Issues
 - Increase USB buffers via `/etc/modprobe.d/usb.conf` if packets drop.
 - Use powered USB 3.0 hub to ensure sufficient power.
+- Verify USB 3.0 connection: `lsusb -t` should show `5000M` (not `480M`).
