@@ -501,8 +501,11 @@ public:
     float zmultiplier = z_table.at(y, x);
     if (0 < zmultiplier)
     {
-      // Check saturation using NEON
-      int32x4_t m_vec = vld1q_s32(m);
+      // Check saturation using NEON (manually load 3 elements into 4-element vector)
+      int32x4_t m_vec = vdupq_n_s32(0);
+      m_vec = vsetq_lane_s32(m[0], m_vec, 0);
+      m_vec = vsetq_lane_s32(m[1], m_vec, 1);
+      m_vec = vsetq_lane_s32(m[2], m_vec, 2);
       int32x4_t sat_vec = vdupq_n_s32(32767);
       uint32x4_t sat_cmp = vceqq_s32(m_vec, sat_vec);
       bool saturated = vgetq_lane_u32(sat_cmp, 0) != 0 || 
@@ -791,10 +794,8 @@ public:
         float dist_acc = 0.0f;
         float32x2_t m_norm_vec = vld1_f32(m_normalized);
 
-        // Load Gaussian kernel (9 elements) - process in groups
-        float32x4_t gauss0 = vld1q_f32(&params.gaussian_kernel[0]);
-        float32x4_t gauss1 = vld1q_f32(&params.gaussian_kernel[4]);
-        float gauss8 = params.gaussian_kernel[8];
+        // Load Gaussian kernel (9 elements) - use array access for variable indices
+        const float* gauss_kernel = params.gaussian_kernel;
 
         int j = 0;
         for(int yi = -1; yi < 2; ++yi)
@@ -803,7 +804,7 @@ public:
           {
             if(yi == 0 && xi == 0)
             {
-              float gauss_val = (j < 4) ? vgetq_lane_f32(gauss0, j) : (j < 8) ? vgetq_lane_f32(gauss1, j - 4) : gauss8;
+              float gauss_val = gauss_kernel[j];
               weight_acc += gauss_val;
               weighted_m_acc[0] += gauss_val * m_ptr[0];
               weighted_m_acc[1] += gauss_val * m_ptr[1];
@@ -837,7 +838,7 @@ public:
             dist *= 0.5f;
 
             float weight = 0.0f;
-            float gauss_val = (j < 4) ? vgetq_lane_f32(gauss0, j) : (j < 8) ? vgetq_lane_f32(gauss1, j - 4) : gauss8;
+            float gauss_val = gauss_kernel[j];
 
             if(other_norm2 >= threshold)
             {
