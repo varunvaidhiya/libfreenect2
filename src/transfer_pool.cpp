@@ -28,6 +28,8 @@
 
 #include <libfreenect2/usb/transfer_pool.h>
 #include <libfreenect2/logging.h>
+#include <iomanip>
+#include <ios>
 
 #define WRITE_LIBUSB_ERROR(__RESULT) libusb_error_name(__RESULT) << " " << libusb_strerror((libusb_error)__RESULT)
 
@@ -100,7 +102,11 @@ bool TransferPool::submit()
 
     if(r != LIBUSB_SUCCESS)
     {
-      LOG_ERROR << "failed to submit transfer: " << WRITE_LIBUSB_ERROR(r);
+      // Only log first few errors to avoid spam, but count all failures
+      if(failcount < 5)
+      {
+        LOG_ERROR << "failed to submit transfer: " << WRITE_LIBUSB_ERROR(r);
+      }
       transfers_[i].setStopped(true);
       failcount++;
     }
@@ -108,8 +114,26 @@ bool TransferPool::submit()
 
   if (failcount == transfers_.size())
   {
-    LOG_ERROR << "all submissions failed. Try debugging with environment variable: LIBUSB_DEBUG=3.";
+    LOG_ERROR << "all " << transfers_.size() << " transfer submissions failed. Try debugging with environment variable: LIBUSB_DEBUG=3.";
+    LOG_ERROR << "On Raspberry Pi, this may indicate:"
+              << " 1) USB controller overloaded - reduce LIBFREENECT2_IR_TRANSFERS"
+              << " 2) USB 3.0 connection issues - check lsusb -t"
+              << " 3) Insufficient power - use powered USB 3.0 hub"
+              << " 4) Too many transfers - try LIBFREENECT2_IR_TRANSFERS=60 or lower";
     return false;
+  }
+  else if (failcount > 0)
+  {
+    float fail_percent = (failcount * 100.0f) / transfers_.size();
+    LOG_WARNING << failcount << " of " << transfers_.size() << " transfers failed to submit (" 
+                << std::fixed << std::setprecision(1) << fail_percent << "%)";
+    if (fail_percent > 50.0f)
+    {
+      LOG_WARNING << "High transfer failure rate! On Raspberry Pi, try:"
+                  << " 1) Reduce transfer count: export LIBFREENECT2_IR_TRANSFERS=60"
+                  << " 2) Disable RGB stream: use -norgb flag"
+                  << " 3) Check USB 3.0 connection and power supply";
+    }
   }
 
   return true;

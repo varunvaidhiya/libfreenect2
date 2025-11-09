@@ -34,18 +34,27 @@ When running `Protonect cpu -noviewer` on Raspberry Pi, you may see:
 
 This eliminates RGB JPEG decoding workload and reduces USB bandwidth by approximately 50%, significantly improving depth stream stability.
 
-### 2. Increase USB Transfer Pool Sizes
+### 2. USB Transfer Pool Sizes (Already Optimized for ARM)
 
-Increase the number of USB transfer buffers to better handle packet bursts:
+The default transfer pool size is automatically set to 70 on ARM/Raspberry Pi (optimized for USB controller capacity).
 
+**If you see LIBUSB_ERROR_IO errors**, the transfer count may be too high:
 ```bash
-export LIBFREENECT2_IR_TRANSFERS=120  # Default: 60, increase to 120
-export LIBFREENECT2_IR_PACKETS=64     # Default: 8, increase if supported
-export LIBFREENECT2_RGB_TRANSFERS=40  # Default: 20, increase if using RGB
+# Reduce transfer count if you get LIBUSB_ERROR_IO errors
+export LIBFREENECT2_IR_TRANSFERS=60  # Default on ARM: 70, reduce to 60 if needed
 ./build/bin/Protonect cpu -noviewer -norgb
 ```
 
-**Note**: More transfers = more memory usage. Monitor system memory.
+**If you have stable USB 3.0 and want to try more transfers** (test carefully):
+```bash
+export LIBFREENECT2_IR_TRANSFERS=80  # Increase cautiously, monitor for errors
+./build/bin/Protonect cpu -noviewer -norgb
+```
+
+**Note**: 
+- More transfers = more memory usage and higher USB controller load
+- Too many transfers (>100) cause LIBUSB_ERROR_IO on Raspberry Pi
+- Default of 70 is a balance between packet buffering and USB controller capacity
 
 ### 3. USB System Tuning (Kernel Parameters)
 

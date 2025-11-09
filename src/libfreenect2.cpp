@@ -859,12 +859,13 @@ bool Freenect2DeviceImpl::open()
   ir_pkts_per_xfer = 64;
   ir_num_xfers = 8;
 #elif defined(__arm__) || defined(__aarch64__)
-  // ARM/Raspberry Pi: Increase transfer pools to handle USB bandwidth limitations
-  // More transfers = better chance of catching packets before buffer overflow
-  // Default values may be too low for reliable operation on Pi
-  ir_num_xfers = 120;  // Increased from 60 to handle packet bursts
+  // ARM/Raspberry Pi: Optimize transfer pools for USB controller limitations
+  // Balance between packet buffering and USB controller capacity
+  // Too many transfers (>100) cause LIBUSB_ERROR_IO on some Pi models
+  ir_num_xfers = 70;  // Conservative default that works on most Pi models
+  // Note: Can be increased via LIBFREENECT2_IR_TRANSFERS if needed, but test first
   // Note: ir_pkts_per_xfer kept at 8 (some Pi USB controllers may not support larger values)
-  // RGB defaults are acceptable, but consider disabling RGB stream with -norgb for depth-only use
+  // IMPORTANT: Use -norgb flag to disable RGB stream and reduce USB bandwidth by ~50%
 #endif
 
   const char *xfer_str;
@@ -976,14 +977,25 @@ bool Freenect2DeviceImpl::startStreams(bool enable_rgb, bool enable_depth)
   {
     LOG_INFO << "submitting rgb transfers...";
     rgb_transfer_pool_.enableSubmission();
-    if (!rgb_transfer_pool_.submit()) return false;
+    if (!rgb_transfer_pool_.submit()) 
+    {
+      LOG_ERROR << "Failed to submit RGB transfers. On Raspberry Pi, consider using -norgb flag to disable RGB stream.";
+      return false;
+    }
   }
 
   if (enable_depth)
   {
     LOG_INFO << "submitting depth transfers...";
     ir_transfer_pool_.enableSubmission();
-    if (!ir_transfer_pool_.submit()) return false;
+    if (!ir_transfer_pool_.submit()) 
+    {
+      LOG_ERROR << "Failed to submit depth transfers. On Raspberry Pi, try:"
+                << " 1) Reduce transfer count: export LIBFREENECT2_IR_TRANSFERS=60"
+                << " 2) Disable RGB stream: use -norgb flag"
+                << " 3) Check USB 3.0 connection and power supply";
+      return false;
+    }
   }
 
   state_ = Streaming;
